@@ -146,12 +146,10 @@
             if (data) {
                 try {
                     const parsed = JSON.parse(data);
-                    // Selalu muat konfigurasi dan antrean (queue) yang belum tersinkron
                     state.unsyncedQueue = parsed.unsyncedQueue || [];
                     state.isSynced = state.unsyncedQueue.length === 0;
                     state.config = parsed.config || { schoolName: '', tahunAjaran: '', kepsekName: '', kepsekNIP: '', guruName: '', guruNIP: '' };
                     
-                    // Muat data master HANYA JIKA TIDAK ADA INTERNET
                     if (!navigator.onLine) {
                         state.classes = parsed.classes || [];
                         state.attendance = parsed.attendance || [];
@@ -166,7 +164,6 @@
             if (data) {
                 try {
                     const parsed = JSON.parse(data);
-                    // Timpa data master dari penyimpanan lokal
                     if (state.classes.length === 0) state.classes = parsed.classes || [];
                     if (state.attendance.length === 0) state.attendance = parsed.attendance || [];
                     if (state.grades.length === 0) state.grades = parsed.grades || [];
@@ -275,7 +272,7 @@
                 }
 
                 if (hasUpdates) {
-                    saveToLocal(); // Memperbarui cadangan lokal setelah sukses ditarik
+                    saveToLocal();
                     state.isSynced = true;
                     showToast('Berhasil ditarik & tersinkronisasi!', 'success');
                 } else {
@@ -430,8 +427,6 @@
         function renderLogin(root) {
             root.innerHTML = `
                 <div class="min-h-screen w-full flex items-center justify-center relative overflow-hidden bg-slate-950">
-                    
-                    <!-- INDIKATOR KONEKSI GOOGLE APPS SCRIPT -->
                     <div class="absolute top-6 right-6 md:top-8 md:right-8 z-50 animate-fade">
                         <div class="px-5 py-2.5 bg-blue-500/10 border border-blue-500/30 rounded-full flex items-center gap-3 backdrop-blur-md shadow-lg shadow-blue-900/20">
                             <span class="relative flex h-2.5 w-2.5">
@@ -503,10 +498,10 @@
                     renderApp();
                     
                     if (navigator.onLine) {
-                        window.fetchFromServer(); // Menarik data langsung jika online
+                        window.fetchFromServer();
                         if(state.unsyncedQueue.length > 0) window.syncToServer();
                     } else {
-                        loadOfflineData(); // Muat paksa dari cache
+                        loadOfflineData();
                         renderApp();
                         showToast('Anda Sedang Offline. Memuat data lokal.', 'warning');
                     }
@@ -866,10 +861,10 @@
                                 <th class="px-6 py-8">Nama Siswa</th>
                                 <th class="px-6 py-8">Jenis</th>
                                 <th class="px-6 py-8">Materi & Asessmen</th>
-                                <th class="px-6 py-8 text-center">Nilai</th>
+                                <th class="px-6 py-8 text-center">Nilai Asli</th>
                                 <th class="px-6 py-8 text-center">KKTP</th>
                                 <th class="px-6 py-8 text-center">Remedial Ke</th>
-                                <th class="px-6 py-8 text-center">Pengayaan</th>
+                                <th class="px-6 py-8 text-center">Input Remedial</th>
                                 <th class="px-6 py-8 text-center">Keterangan</th>
                                 <th class="px-6 py-8 text-center">Aksi</th>
                             </tr>
@@ -1837,27 +1832,38 @@
             }, 100);
         };
 
+        // =========================================================================
+        // PERUBAHAN UTAMA: LOGIKA SIMPAN REMEDIAL
+        // =========================================================================
         window.saveRemedial = (gradeId, studentName, kktp, inputId, descId, dateId) => {
             const inputEl = document.getElementById(inputId);
             const descEl = document.getElementById(descId);
             const dateEl = document.getElementById(dateId);
             
-            let newScore = Number(inputEl.value);
+            // Tangkap nilai inputan murni dari guru
+            const inputtedScore = Number(inputEl.value); 
             const description = descEl.value.trim();
             const remedialDate = dateEl ? dateEl.value : state.currentDate;
             
-            if (inputEl.value === '' || isNaN(newScore)) {
+            if (inputEl.value === '' || isNaN(inputtedScore)) {
                 return showToast('Masukkan nilai perbaikan terlebih dahulu!', 'error');
             }
 
-            if (newScore >= kktp) {
-                newScore = kktp;
+            // Hitung nilai akhir yang sudah dibatasi KKTP
+            let finalScore = inputtedScore;
+            if (finalScore >= kktp) {
+                finalScore = kktp;
             }
 
             const gradeIdx = state.grades.findIndex(g => g.id === gradeId);
             if (gradeIdx > -1) {
                 const gradeDoc = state.grades[gradeIdx];
-                gradeDoc.scores[studentName] = newScore;
+                
+                // Tangkap nilai ASLI (Sebelum ditimpa)
+                const originalScore = gradeDoc.scores[studentName] || 0; 
+                
+                // Timpa nilai di buku utama dengan Nilai Akhir yang dibatasi KKTP
+                gradeDoc.scores[studentName] = finalScore;
                 
                 if (!gradeDoc.remedialCounts) gradeDoc.remedialCounts = {};
                 gradeDoc.remedialCounts[studentName] = (gradeDoc.remedialCounts[studentName] || 0) + 1;
@@ -1866,63 +1872,50 @@
                 saveToLocal();
                 renderApp();
                 
+                // 1. Simpan Buku Nilai ke Server (Tetap sama, menggunakan Final Score di dalam gradeDoc.scores)
                 if (typeof GOOGLE_SCRIPT_NILAI !== 'undefined' && GOOGLE_SCRIPT_NILAI && navigator.onLine) {
                     const dataForSheet = {
                         classId: gradeDoc.classId, className: gradeDoc.className, assessmentName: gradeDoc.assessmentName,
                         type: gradeDoc.type, date: gradeDoc.date, kktp: gradeDoc.kktp, scores: gradeDoc.scores,
                         remedialCounts: gradeDoc.remedialCounts, studentList: state.classes.find(c => c.id === gradeDoc.classId)?.students || []
                     };
-                    fetch(GOOGLE_SCRIPT_NILAI, {
-                        method: "POST", mode: "no-cors", headers: { "Content-Type": "application/json" }, body: JSON.stringify(dataForSheet)
-                    })
+                    fetch(GOOGLE_SCRIPT_NILAI, { method: "POST", mode: "no-cors", headers: { "Content-Type": "application/json" }, body: JSON.stringify(dataForSheet) })
                     .then(() => { state.isSynced = true; renderApp(); })
-                    .catch(e => { 
-                        state.isSynced = false;
-                        state.unsyncedQueue.push({ url: GOOGLE_SCRIPT_NILAI, payload: dataForSheet });
-                        saveToLocal();
-                        renderApp();
-                    });
+                    .catch(e => { state.isSynced = false; state.unsyncedQueue.push({ url: GOOGLE_SCRIPT_NILAI, payload: dataForSheet }); saveToLocal(); renderApp(); });
                 } else if (!navigator.onLine) {
                     const dataForSheet = {
                         classId: gradeDoc.classId, className: gradeDoc.className, assessmentName: gradeDoc.assessmentName,
                         type: gradeDoc.type, date: gradeDoc.date, kktp: gradeDoc.kktp, scores: gradeDoc.scores,
                         remedialCounts: gradeDoc.remedialCounts, studentList: state.classes.find(c => c.id === gradeDoc.classId)?.students || []
                     };
-                    state.isSynced = false;
-                    state.unsyncedQueue.push({ url: GOOGLE_SCRIPT_NILAI, payload: dataForSheet });
-                    saveToLocal();
-                    renderApp();
+                    state.isSynced = false; state.unsyncedQueue.push({ url: GOOGLE_SCRIPT_NILAI, payload: dataForSheet }); saveToLocal(); renderApp();
                 }
+
+                // 2. Simpan Log Riwayat Remedial (Memisahkan Original, Inputted, dan Final)
+                const remedialDataLog = {
+                    isRemedialLog: true, 
+                    className: gradeDoc.className, 
+                    studentName: studentName, 
+                    assessmentName: gradeDoc.assessmentName,
+                    type: gradeDoc.type, 
+                    kktp: gradeDoc.kktp, 
+                    originalScore: originalScore,      // Ditambahkan
+                    inputtedScore: inputtedScore,      // Ditambahkan
+                    finalScore: finalScore,            // Menggantikan newScore
+                    attempt: gradeDoc.remedialCounts[studentName],
+                    description: description, 
+                    date: remedialDate
+                };
 
                 if (typeof GOOGLE_SCRIPT_REMEDIAL !== 'undefined' && GOOGLE_SCRIPT_REMEDIAL && navigator.onLine) {
-                    const remedialDataLog = {
-                        isRemedialLog: true, className: gradeDoc.className, studentName: studentName, assessmentName: gradeDoc.assessmentName,
-                        type: gradeDoc.type, kktp: gradeDoc.kktp, newScore: newScore, attempt: gradeDoc.remedialCounts[studentName],
-                        description: description, date: remedialDate
-                    };
-                    fetch(GOOGLE_SCRIPT_REMEDIAL, {
-                        method: "POST", mode: "no-cors", headers: { "Content-Type": "application/json" }, body: JSON.stringify(remedialDataLog)
-                    })
+                    fetch(GOOGLE_SCRIPT_REMEDIAL, { method: "POST", mode: "no-cors", headers: { "Content-Type": "application/json" }, body: JSON.stringify(remedialDataLog) })
                     .then(() => { state.isSynced = true; renderApp(); })
-                    .catch(e => { 
-                        state.isSynced = false;
-                        state.unsyncedQueue.push({ url: GOOGLE_SCRIPT_REMEDIAL, payload: remedialDataLog });
-                        saveToLocal();
-                        renderApp();
-                    });
+                    .catch(e => { state.isSynced = false; state.unsyncedQueue.push({ url: GOOGLE_SCRIPT_REMEDIAL, payload: remedialDataLog }); saveToLocal(); renderApp(); });
                 } else if (!navigator.onLine) {
-                    const remedialDataLog = {
-                        isRemedialLog: true, className: gradeDoc.className, studentName: studentName, assessmentName: gradeDoc.assessmentName,
-                        type: gradeDoc.type, kktp: gradeDoc.kktp, newScore: newScore, attempt: gradeDoc.remedialCounts[studentName],
-                        description: description, date: remedialDate
-                    };
-                    state.isSynced = false;
-                    state.unsyncedQueue.push({ url: GOOGLE_SCRIPT_REMEDIAL, payload: remedialDataLog });
-                    saveToLocal();
-                    renderApp();
+                    state.isSynced = false; state.unsyncedQueue.push({ url: GOOGLE_SCRIPT_REMEDIAL, payload: remedialDataLog }); saveToLocal(); renderApp();
                 }
 
-                showToast(newScore === kktp ? 'Siswa Tuntas! Nilai disimpan sebagai KKTP.' : 'Nilai perbaikan berhasil disimpan!');
+                showToast(finalScore === kktp ? 'Siswa Tuntas! Nilai disimpan sebagai KKTP.' : 'Nilai perbaikan berhasil disimpan!');
             }
         };
 
